@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Android / Gradle
+spikes/android-phase0-spike/.gradle/
+spikes/android-phase0-spike/build/
+spikes/android-phase0-spike/app/build/
+spikes/android-phase0-spike/local.properties
+spikes/android-phase0-spike/.idea/
+apps/android-shield-mvp/.gradle/
+apps/android-shield-mvp/build/
+apps/android-shield-mvp/app/build/
+apps/android-shield-mvp/local.properties
+apps/android-shield-mvp/.idea/
+*.iml
+*.apk
+*.aab
+
+# Raw biometric / consented lab recordings (NEVER commit raw audio/video/PII)
+data/raw/
+data/consented_lab/
+*.wav
+*.pcm
+*.mp4
+*.mkv
+*.avi
+*.onnx
+*.tflite
+*.pt
+*.pth
+
+# IDE / OS
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local env / SQLite
+.env
+*.db
+*.sqlite
+*.sqlite3

@@ -1,0 +1,61 @@
+# Báo Cáo Rà Soát Kiến Trúc v1 (Design Review — Post-Mortem)
+
+**Tài liệu được rà soát:** `SYSTEM_ARCHITECTURE.md` (phiên bản v1)  
+**Kết quả rà soát:** Phát hiện **14 lỗ hổng và điểm cần nâng cấp** (**4 P0**, **7 P1**, **3 P2**) trước khi bắt tay vào lập trình sản phẩm. Toàn bộ các phát hiện này đã được giải quyết hoặc gắn cổng kiểm chứng thực nghiệm (*Phase 0 Validation Spike*) trong [SYSTEM_ARCHITECTURE.md](./SYSTEM_ARCHITECTURE.md) (**v2.0**) và [THREAT_MODEL.md](./THREAT_MODEL.md).
+
+---
+
+## 1. Nhận định Tổng quát về Kiến trúc v1
+
+Kiến trúc v1 được xây dựng xoay quanh giả định: *"kẻ gian thực hiện một cuộc gọi thoại/video đủ dài để 3 động cơ AI kịp thu âm, bắt hình và phân tích ngữ cảnh ngay trong cuộc gọi đó"*. Khi đối chiếu với **hành vi thực tế của hệ điều hành Android**, **thủ đoạn lừa đảo thực tế tại Việt Nam** và **hành lang pháp lý từ năm 2026**, giả định này bộc lộ ba vết nứt cấu trúc:
+
+1. **Tắc ở tầng thu nhận tín hiệu Android:** Android không cho phép ứng dụng bên thứ ba thu âm đồng thời khi cuộc gọi VoIP đang giữ micro.
+2. **Lệch pha với thủ đoạn lừa đảo thực tế tại Việt Nam:** Thủ đoạn phổ biến theo cảnh báo của Bộ Công an là **gọi video vài giây chất lượng kém ("sóng yếu") rồi cúp máy và nhắn tin đòi tiền**, không kéo dài đủ để cửa sổ trượt + trạng thái trì hoãn `UNCERTAIN` kịp kích hoạt.
+3. **Bỏ ngỏ điểm mất tiền thực sự & rủi ro chính sách/pháp lý:** Thiếu lớp chặn khi nạn nhân mở app ngân hàng hoặc cài phần mềm điều khiển từ xa; vi phạm chính sách `SEND_SMS` của Google Play; và thiếu cơ chế tuân thủ Luật Bảo vệ dữ liệu cá nhân 91/2025/QH15 đối với dữ liệu sinh trắc học của người gọi bên thứ ba.
+
+---
+
+## 2. Chi tiết 14 Phát hiện & Quyết định Nâng cấp lên v2
+
+### Nhóm P0 — Lỗ hổng Nghiêm trọng (Bắt buộc xử lý trước khi viết code)
+
+| Mã | Lỗ hổng trong v1 | Bằng chứng kỹ thuật / thực tiễn | Giải pháp trong v2 | Trạng thái |
+| :--- | :--- | :--- | :--- | :--- |
+| **P0-1** | **Track 1B (Android Loa ngoài + Micro + AEC) không thu được tiếng & tự hủy tín hiệu** | Từ Android 10 (API 29), chính sách *Concurrent Audio Capture* xếp `AudioSource.VOICE_COMMUNICATION` (Zalo, Messenger, cuộc gọi) là nguồn nhạy cảm ưu tiên cao: app khác vẫn chạy không văng lỗi nhưng **nhận về buffer câm toàn số 0** (phát hiện qua `AudioRecordingCallback.isClientSilenced()`). Ngoài ra, đặt WebRTC AEC trước Engine A sẽ xóa chính âm thanh phát ra từ loa ngoài (tức xóa luôn giọng kẻ gian). | Bỏ giả định Android thu được micro trong cuộc gọi VoIP. Bắt buộc chạy **Phase 0 Validation Spike** trên 3–4 hãng máy Android. Mặc định Android dùng **Layer 0 (NotificationListener + CallScreening) + MediaProjection Video + Financial Guard**. Audio chỉ chạy trên Desktop (WASAPI), app WebRTC riêng, thiết bị phụ đặt cạnh, hoặc máy vượt qua Spike. Loại bỏ AEC trước Engine A. | Gated by Phase 0 Spike + Redesigned in v2 |
+| **P0-2** | **Không khớp kịch bản lừa đảo thực tế tại Việt Nam** | Bộ Công an liên tục cảnh báo kịch bản: kẻ gian gọi video deepfake chỉ **vài giây**, hình mờ/giật, lấy cớ "mất sóng/sóng yếu" rồi cúp máy, sau đó **nhắn tin** yêu cầu chuyển tiền vào tài khoản lạ. Với cửa sổ 4s + `UNCERTAIN` 8–15s + yêu cầu 2 cửa sổ liên tiếp, v1 không kịp báo và bỏ trống hoàn toàn kênh tin nhắn. | Bổ sung **Cross-Channel Suspicion Session (TTL 30–60 phút)** gom cả cuộc gọi ngắn + tin nhắn + hành vi mở app sau cuộc gọi. Mở rộng Engine C phân tích tin nhắn Zalo/Messenger qua `NotificationListenerService`. Thêm luật hành vi: *cuộc gọi ngắn + hình kém + tài khoản lạ + tin nhắn vay tiền → báo Đỏ*. | Resolved in v2 |
+| **P0-3** | **Thiếu lớp chặn ngay tại điểm mất tiền (Point of Loss)** | Tiền chỉ mất khi nạn nhân mở ứng dụng ngân hàng/ví điện tử hoặc bị dụ cài app điều khiển từ xa (`AnyDesk`, `TeamViewer`) / file `.apk` "dịch vụ công" giả — không phải ngay lúc nghe máy. | Thêm lớp **Point-of-Loss Interception** dùng `UsageStatsManager` và giám sát cài đặt gói: bật màn hình làm nguội (*Cooling-Off Overlay*) khi mở app ngân hàng trong phiên nghi vấn; cảnh báo ngay khi cài/mở app điều khiển từ xa hoặc APK ngoài Play; thiết kế điểm mở rộng tra cứu tài khoản lừa đảo. | Resolved in v2 |
+| **P0-4** | **Công thức trung bình có trọng số bị pha loãng & dễ bị khai thác; ngưỡng tự đặt** | Công thức v1 lấy trung bình có trọng số khiến 1 nhánh báo mạnh (`0.95`) bị kéo tụt xuống `~0.50` nếu nhánh khác chưa có tín hiệu. Nghiêm trọng hơn, kẻ gian cố tình làm hình mờ để kéo `C_v -> 0` khiến hệ thống tự loại bỏ nhánh video. Các ngưỡng `0.40/0.65/0.80` và mục tiêu `FPR < 2%/call` là con số ước lượng chưa qua hiệu chỉnh thực nghiệm. | Đổi sang **Calibrated Noisy-OR** (hoặc hồi quy Logistic meta-classifier) kèm ghi đè khi một nhánh có bằng chứng mạnh. Chuyển *hình kém + cuộc gọi ngắn + người lạ* thành tín hiệu **tăng rủi ro** (`ShortGlitchyCall`). Đánh dấu tường minh mọi ngưỡng là *Provisional* cho tới khi hiệu chỉnh trên Replay Corpus. | Resolved in v2 |
+
+---
+
+### Nhóm P1 — Nâng cấp Kiến trúc & Chính sách trước MVP
+
+| Mã | Lỗ hổng trong v1 | Bằng chứng kỹ thuật / thực tiễn | Giải pháp trong v2 | Trạng thái |
+| :--- | :--- | :--- | :--- | :--- |
+| **P1-5** | **Đánh giá quá cao Lip-Sync & Active Probing ở nhánh Video** | (a) Lip-Sync không bắt được face-swap live kèm đổi giọng live vì miệng thật của kẻ gian giữ nguyên nhịp nói — chỉ hữu ích cho clip dựng sẵn/lồng tiếng. (b) Deep-Live-Cam và FaceFusion đã có mặt nạ xử lý che khuất (*occlusion mask* bằng MediaPipe/CelebAMask-HQ) cho tay che mặt; bắt người cao tuổi đang hoảng loạn tự ra đề kiểm tra là quá tải nhận thức. | Đưa **Xác minh Ngoài kênh** (*Mật khẩu gia đình + Cúp máy gọi lại số đã lưu*) lên làm tuyến phòng thủ chính. Định vị lại Lip-Sync cho clip dựng sẵn 3–10 giây; hạ *Active Probing* thành tùy chọn phụ trợ. | Resolved in v2 |
+| **P1-6** | **Lệch miền dữ liệu (Domain Shift) trên mạng VoIP thực tế** | Ảnh chụp màn hình sau nén và co giãn của Zalo làm mất phần lớn nhiễu tần số cao mà SRM dựa vào; ngược lại, nén bitrate thấp, mất gói và bộ khử nhiễu AI tích hợp của ứng dụng gọi có thể khiến giọng người thật bị nhận nhầm là giọng giả trên AASIST (được huấn luyện từ dữ liệu sạch VSASV/ASVspoof). | Tự xây dựng tập dữ liệu đánh giá & fine-tune bằng cách chạy tấn công thật (Deep-Live-Cam + Voice Clone tiếng Việt) **qua cuộc gọi Zalo/Messenger thật** và thu lại đúng qua pipeline thực tế của app (khởi động từ 20–30 mẫu trong Phase 0). | Planned in Phase 0 & 2 |
+| **P1-7** | **Sai đơn vị đo lường báo động giả (FPR theo cuộc gọi thay vì theo người dùng/tháng)** | Cuộc gọi deepfake rất hiếm (base rate cực thấp). Với `FPR = 2%/cuộc` và trung bình 5 cuộc/ngày, mỗi ~10 ngày sẽ nổ 1 báo Đỏ nhầm kèm SOS sang máy con → cả hai thế hệ đều sẽ tắt app do *Alarm Fatigue*. | Đổi KPI thành **số lần báo Đỏ nhầm trên mỗi người dùng mỗi tháng** (`<= 0.5/user/month`). Thêm **Family Trusted Allowlist** (miễn trừ danh bạ gia đình đã xác thực) và cơ chế **Layer 0 Gatekeeper** chỉ chạy AI nặng khi có dấu hiệu bất thường. | Resolved in v2 |
+| **P1-8** | **Hành động khi báo Đỏ có thể gây hại ngược (Safety & Audio Loop)** | Nút `"TẮT MÁY NGAY"` có thể cắt nhầm cuộc gọi cấp cứu y tế hoặc cơ quan chức năng thật. Phát giọng TTS cảnh báo khi loa ngoài đang mở khiến **kẻ gian nghe thấy** để đổi bài trấn an ("quảng cáo thôi bác") và giọng TTS lọt ngược vào chính ASR gây vòng lặp tự kích hoạt. | Đổi nút chính thành **`TẠM DỪNG — GỌI LẠI SỐ ĐÃ LƯU`**; tuyệt đối không chặn số khẩn cấp (`113/115/114`). Ưu tiên rung + overlay thị giác; cấm phát TTS qua loa ngoài khi micro cuộc gọi đang mở. | Resolved in v2 |
+| **P1-9** | **Thiếu cơ chế chống phá hoại (Anti-Tamper) & lộ mô hình trên thiết bị** | Kẻ gian thường dụ nạn nhân tắt/gỡ ứng dụng bảo vệ ("app đó là virus"). Ngoài ra, đóng gói toàn bộ model vào APK cho phép kẻ tấn công tải về làm *oracle* tinh chỉnh deepfake đến khi vượt qua ngưỡng (White-box Probing). | Bổ sung **Anti-Tamper Heartbeat** cảnh báo ngay sang máy người giám hộ nếu dịch vụ bị tắt, bị thu hồi quyền hoặc bị gỡ ngay sau phiên nghi vấn. Giữ một phần trọng số/luật ở server và xoay vòng phiên bản định kỳ. | Resolved in v2 |
+| **P1-10** | **Vi phạm chính sách Google Play (`SEND_SMS`, DND, Sensitive Permissions)** | Google Play cấm quyền `SEND_SMS` đối với mọi app không phải *Default SMS Handler* (Android 15+ khóa cứng thêm với app sideload). FCM không tự vượt chế độ Không làm phiền (DND). Các quyền `SYSTEM_ALERT_WINDOW`, `MediaProjection`, `Accessibility`, `Foreground Service (microphone/mediaProjection)` đều có nguy cơ bị từ chối khi xét duyệt Play. | Loại bỏ gửi `SEND_SMS` ngầm qua `SmsManager`. Thay bằng **FCM High-Priority** (app con tự xin quyền vượt DND) + **Server SMS/Voice Gateway Fallback** (khi không có ACK) + **`ACTION_SENDTO` (`smsto:`)** dự phòng 1 chạm khi mất mạng. Lập hồ sơ giải trình quyền Google Play rõ ràng từ Phase 0. | Resolved in v2 |
+| **P1-11** | **Rủi ro Pháp lý (Luật 91/2025/QH15) & Đạo đức (Lạm dụng quyền giám hộ)** | **Luật Bảo vệ dữ liệu cá nhân số 91/2025/QH15** (hiệu lực 01/01/2026) xếp giọng nói và khuôn mặt vào **dữ liệu cá nhân nhạy cảm**, đòi hỏi sự đồng ý tường minh — trong khi người gọi bên thứ ba không hề đồng ý cho đẩy giọng/mặt họ lên cloud. Về đạo đức, lạm dụng tài chính người cao tuổi thường xuất phát từ chính người thân; và nghiên cứu thực địa trên người cao tuổi cần phê duyệt đạo đức. | Cấm gửi raw audio/video của người gọi lên cloud ở bản thương mại (chỉ xử lý cục bộ/đặc trưng ẩn danh; Hybrid Cloud chỉ dùng trong nghiên cứu có *Informed Consent* & duyệt đạo đức). Áp dụng **Least-Privilege Guardian** (mặc định không gửi nội dung hội thoại, hỗ trợ đa người giám hộ, có nhật ký minh bạch *Transparency Log*). Tham vấn luật sư từ Phase 0. | Resolved in v2 |
+
+---
+
+### Nhóm P2 — Kỹ thuật Hệ thống & Vận hành
+
+| Mã | Lỗ hổng trong v1 | Lý do cần nâng cấp | Giải pháp trong v2 | Trạng thái |
+| :--- | :--- | :--- | :--- | :--- |
+| **P2-12** | **Thiếu phân hạng thiết bị (Device Tiering) & quản lý tài nguyên** | Máy Android phổ thông của người cao tuổi thường chỉ có `3–4 GB RAM`; chạy cùng lúc Qwen2.5-1.5B 4-bit + MediaPipe + Zalo Video sẽ tràn RAM hoặc làm giật chính cuộc gọi Zalo. | Chia **3 hạng thiết bị** (Tier 1 `<= 4GB` chạy Layer 0 + Chat NLP nhẹ + Financial Guard; Tier 2 `6GB` thêm Video 2 FPS; Tier 3 `>= 8GB/NPU` chạy đầy đủ) kèm bộ giới hạn nhiệt/CPU (*Compute Budget Governor*). | Resolved in v2 |
+| **P2-13** | **Thiếu hạ tầng Bảo mật & MLOps (Threat Model, Replay Harness, Prompt Injection)** | Thiếu tài liệu mô hình mối đe dọa; chưa có công cụ phát lại cuộc gọi để kiểm thử hồi quy; chưa có quy trình cập nhật ngưỡng/rollback khi công cụ TTS mới xuất hiện; chưa chặn kẻ gian nói câu lệnh chèn (Prompt Injection) đánh lừa SLM. | Tạo [THREAT_MODEL.md](./THREAT_MODEL.md); bổ sung **Offline Replay Evaluation Harness**, **Remote Config & Rollback**, **Privacy-Preserving Telemetry**, và ép đầu ra **Structured JSON / Encoder Classifier (`PhoBERT-v2`)** tách biệt vùng `<UNTRUSTED_INPUT>` chống Prompt Injection. | Resolved in v2 |
+| **P2-14** | **Lộ trình 16 tuần trong v1 bất khả thi** | Dồn thu thập dữ liệu, huấn luyện 3 model, dựng Desktop, dựng Android, làm SOS và thử nghiệm thực địa vào 16 tuần bỏ qua rủi ro OS không tương thích. | Cắt gọn và tái cấu trúc thành **Phase 0 Validation Spike (2 tuần)** kiểm chứng kỹ thuật & pháp lý trước khi cam kết phát triển sản phẩm qua 3 giai đoạn tiếp theo (tổng 6 tháng cho bản pilot thực địa). | Resolved in v2 |
+
+---
+
+## 3. Điểm tự điều chỉnh so với Giả định Ban đầu (Self-Corrections)
+
+Nhằm giữ trung thực kỹ thuật cho dự án nghiên cứu, các điểm viết quá tay trong v1 được ghi nhận rút lại chính thức:
+1. **Rút lại tuyên bố** *"Android Smart Speakerphone Mode + AEC khả thi trên máy không root"* → Đổi thành *chỉ kích hoạt nếu vượt qua kiểm chứng `isClientSilenced()` tại Phase 0, không dùng AEC trước Engine A*.
+2. **Rút lại tuyên bố** *"Active Probing là đòn đánh chí mạng vào mọi công cụ Face-Swap live"* → Hạ xuống thành tín hiệu phụ trợ tùy chọn.
+3. **Rút lại mục tiêu cố định** `FPR < 2%` theo cuộc gọi và bộ ngưỡng cứng `0.40 / 0.65 / 0.80` → Chuyển sang `<= 0.5 báo Đỏ nhầm / người dùng / tháng` và xác định ngưỡng qua kiểm thử phát lại (*Replay Harness*).
+4. **Rút lại cơ chế** tự động gửi SMS bằng `SmsManager` (`SEND_SMS`) cho bản phân phối trên Google Play.
